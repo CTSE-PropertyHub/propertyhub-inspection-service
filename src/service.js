@@ -2,6 +2,7 @@ const { v4: uuidv4 } = require('uuid');
 const store = require('./store');
 
 const VALID_STATUSES = ['SCHEDULED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'];
+const PROPERTY_SERVICE_URL = process.env.PROPERTY_SERVICE_URL || 'http://propertyhub-property-service';
 
 function httpError(status, message, fields) {
   const err = new Error(message);
@@ -39,12 +40,26 @@ async function getInspection(id, userId, userRole) {
   throw httpError(403, `Role '${userRole}' is not permitted for this operation`);
 }
 
+async function assertPropertyExists(propertyId, userId, userRole) {
+  let res;
+  try {
+    res = await fetch(`${PROPERTY_SERVICE_URL}/properties/${encodeURIComponent(propertyId)}`, {
+      headers: { 'X-User-Id': userId, 'X-User-Role': userRole },
+    });
+  } catch {
+    throw httpError(502, 'Property service unavailable');
+  }
+  if (res.status === 404) throw httpError(422, 'Validation failed', { propertyId: 'propertyId does not exist' });
+  if (!res.ok) throw httpError(502, 'Property service returned an error');
+}
+
 async function createInspection(body, userId, userRole) {
   if (!userId || !userRole) throw httpError(403, 'Missing identity headers');
   if (userRole !== 'Landlord' && userRole !== 'Admin') {
     throw httpError(403, `Role '${userRole}' is not permitted for this operation`);
   }
   validate(body, ['propertyId', 'inspectorId', 'scheduledAt']);
+  await assertPropertyExists(body.propertyId, userId, userRole);
   return store.create({
     id:            uuidv4(),
     propertyId:    body.propertyId,
