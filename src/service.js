@@ -3,6 +3,7 @@ const store = require('./store');
 
 const VALID_STATUSES = ['SCHEDULED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'];
 const PROPERTY_SERVICE_URL = process.env.PROPERTY_SERVICE_URL || 'http://propertyhub-property-service';
+const TENANCY_SERVICE_URL  = process.env.TENANCY_SERVICE_URL  || 'http://tenancy-service';
 
 function httpError(status, message, fields) {
   const err = new Error(message);
@@ -28,6 +29,7 @@ async function listInspections(userId, userRole) {
   if (userRole === 'Admin')     return store.getAll();
   if (userRole === 'Inspector') return store.getAll().then(all => all.filter(i => i.inspectorId === userId));
   if (userRole === 'Landlord')  return store.getAll().then(all => all.filter(i => i.requestedById === userId));
+  if (userRole === 'Tenant')    return store.getAll().then(all => all.filter(i => i.requestedById === userId));
   throw httpError(403, `Role '${userRole}' is not permitted for this operation`);
 }
 
@@ -38,6 +40,23 @@ async function getInspection(id, userId, userRole) {
   if (userRole === 'Admin') return inspection;
   if (inspection.inspectorId === userId || inspection.requestedById === userId) return inspection;
   throw httpError(403, `Role '${userRole}' is not permitted for this operation`);
+}
+
+async function assertTenantHasActiveTenancy(propertyId, tenantId) {
+  let res;
+  try {
+    res = await fetch(`${TENANCY_SERVICE_URL}/tenancy`, {
+      headers: { 'X-User-Id': tenantId, 'X-User-Role': 'Tenant' },
+    });
+  } catch {
+    throw httpError(502, 'Tenancy service unavailable');
+  }
+  if (!res.ok) throw httpError(502, 'Tenancy service returned an error');
+  const tenancies = await res.json();
+  const hasActive = tenancies.some(t => t.propertyId === propertyId && t.status === 'ACTIVE');
+  if (!hasActive) {
+    throw httpError(403, 'You do not have an active tenancy for this property');
+  }
 }
 
 async function assertPropertyExists(propertyId, userId, userRole) {
@@ -55,11 +74,14 @@ async function assertPropertyExists(propertyId, userId, userRole) {
 
 async function createInspection(body, userId, userRole) {
   if (!userId || !userRole) throw httpError(403, 'Missing identity headers');
-  if (userRole !== 'Landlord' && userRole !== 'Admin') {
+  if (userRole !== 'Landlord' && userRole !== 'Admin' && userRole !== 'Tenant') {
     throw httpError(403, `Role '${userRole}' is not permitted for this operation`);
   }
   validate(body, ['propertyId', 'inspectorId', 'scheduledAt']);
   await assertPropertyExists(body.propertyId, userId, userRole);
+  if (userRole === 'Tenant') {
+    await assertTenantHasActiveTenancy(body.propertyId, userId);
+  }
   return store.create({
     id:            uuidv4(),
     propertyId:    body.propertyId,
